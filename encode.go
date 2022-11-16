@@ -87,7 +87,16 @@ func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
 			str, err = value.Interface().(Word).EncodeWord()
 			// Use pointer receiver methods
 		} else if reflect.PtrTo(value.Type()).Implements(wordType) {
-			str, err = value.Addr().Interface().(Word).EncodeWord()
+			if value.CanAddr() {
+				str, err = value.Addr().Interface().(Word).EncodeWord()
+			} else {
+				// This value is not addressable, but needs to be used as a pointer receiver. This is a bit of a problem.
+				// This happens when map key values are used
+				// The best we can do is dupe the value.
+				newAlloc := reflect.New(value.Type())
+				newAlloc.Elem().Set(value)
+				str, err = newAlloc.Interface().(Word).EncodeWord()
+			}
 		}
 		if err != nil {
 			return err
