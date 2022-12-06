@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"testing"
-
-	"github.com/davecgh/go-spew/spew"
 )
 
 type testMapEncodable map[testEncodable]bool
@@ -30,6 +28,8 @@ type testDoc struct {
 	V testMapEncodable
 }
 
+type MapNest map[string]MapNest
+
 func TestEncode(t *testing.T) {
 
 	doc := &testDoc{
@@ -43,5 +43,23 @@ func TestEncode(t *testing.T) {
 		panic(err)
 	}
 
-	fmt.Println(spew.Sdump(data))
+	fmt.Println(string(data))
+
+	mn := make(MapNest)
+
+	mn["level1"] = MapNest{
+		"level2": MapNest{
+			"level3": MapNest{
+				"level4": MapNest{},
+			},
+		},
+	}
+
+	data, err = Marshal(mn)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(string(data))
+
 }

@@ -79,6 +79,8 @@ func isCurly(field reflect.Value) bool {
 }
 
 func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
+	encoder.writeIndentation(depth)
+
 	if canEncodeWord(value) {
 		var str string
 		var err error
@@ -104,8 +106,6 @@ func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
 
 		return encoder.encodeString(str)
 	}
-
-	encoder.writeIndentation(depth)
 
 	switch value.Kind() {
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
