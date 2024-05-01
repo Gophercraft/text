@@ -6,7 +6,6 @@ import (
 	"io"
 	"reflect"
 	"strconv"
-	"strings"
 
 	"github.com/davecgh/go-spew/spew"
 )
@@ -19,15 +18,18 @@ type Word interface {
 }
 
 var (
-	wordType = reflect.TypeOf((*Word)(nil)).Elem()
+	word_type = reflect.TypeFor[Word]()
 )
 
+// A Decoder reads and decodes text values from an input stream.
 type Decoder struct {
-	input        *bufio.Reader
-	line, column int
-	tokens       []*Token
+	input         *bufio.Reader
+	line, column  int
+	peeked_tokens []*token
 }
 
+// NewDecoder returns a new decoder that reads from r.
+// The decoder introduces its own buffering and may read data from r beyond the text values requested.
 func NewDecoder(in io.Reader) *Decoder {
 	return &Decoder{
 		input:  bufio.NewReader(in),
@@ -36,7 +38,8 @@ func NewDecoder(in io.Reader) *Decoder {
 	}
 }
 
-func bitSize(t reflect.Kind) int {
+// Get the size in bits of a numeric type kind
+func bit_size(t reflect.Kind) int {
 	switch t {
 	case reflect.Uint, reflect.Uint64, reflect.Int, reflect.Int64:
 		return 64
@@ -55,265 +58,355 @@ func bitSize(t reflect.Kind) int {
 	}
 }
 
-func initValue(value reflect.Value) {
+// Initializes the value of types that need to be before they are used
+func initialize_value(value reflect.Value) {
 	switch value.Kind() {
 	case reflect.Map:
 		value.Set(reflect.MakeMap(value.Type()))
 	}
 }
 
-func (decoder *Decoder) decodeValue(value reflect.Value) error {
-	if canEncodeWord(value) {
-		var word Word
-		if reflect.PtrTo(value.Type()).Implements(wordType) {
-			word = value.Addr().Interface().(Word)
-		} else if value.Type().Implements(wordType) {
-			word = value.Interface().(Word)
+func (decoder *Decoder) decode_int(value reflect.Value) (err error) {
+	var (
+		int_token *token
+		i         int64
+	)
+	int_token, err = decoder.next_word()
+	if err != nil {
+		return
+	}
+
+	i, err = strconv.ParseInt(int_token.Data, 0, bit_size(value.Kind()))
+	if err != nil {
+		return
+	}
+
+	value.SetInt(i)
+	return
+}
+
+func (decoder *Decoder) decode_uint(value reflect.Value) (err error) {
+	var (
+		uint_token *token
+		u          uint64
+	)
+	uint_token, err = decoder.next_word()
+	if err != nil {
+		return
+	}
+
+	u, err = strconv.ParseUint(uint_token.Data, 0, bit_size(value.Kind()))
+	if err != nil {
+		return
+	}
+
+	value.SetUint(u)
+	return
+}
+
+func (decoder *Decoder) decode_float(value reflect.Value) (err error) {
+	var (
+		float_token *token
+		f           float64
+	)
+	float_token, err = decoder.next_word()
+	if err != nil {
+		return
+	}
+	f, err = strconv.ParseFloat(float_token.Data, bit_size(value.Kind()))
+	if err != nil {
+		return err
+	}
+	value.SetFloat(f)
+	return
+}
+
+func (decoder *Decoder) decode_bool(value reflect.Value) (err error) {
+	var (
+		boolean_token *token
+		b             bool
+	)
+	boolean_token, err = decoder.next_word()
+	if err != nil {
+		err = fmt.Errorf("error getting boolean word token: %w", err)
+		return
+	}
+	b, err = strconv.ParseBool(boolean_token.Data)
+	if err != nil {
+		return
+	}
+	value.SetBool(b)
+	return
+}
+
+func (decoder *Decoder) decode_string(value reflect.Value) (err error) {
+	var (
+		string_token *token
+	)
+	string_token, err = decoder.next_word()
+	if err != nil {
+		return err
+	}
+	value.SetString(string_token.Data)
+	return nil
+}
+
+func (decoder *Decoder) decode_array(value reflect.Value) (err error) {
+	var (
+		open_token  *token
+		next_token  *token
+		close_token *token
+	)
+	open_token, err = decoder.next_token()
+	if err != nil {
+		return
+	}
+
+	if open_token.Type != token_open {
+		return fmt.Errorf("invalid token at start of array: %d", open_token.Type)
+	}
+
+	for i := range value.Len() {
+		next_token, err = decoder.peek_token()
+		if err != nil {
+			return
 		}
-		initValue(value)
-		tok, err := decoder.NextWord()
+		if next_token.Type == token_close {
+			break
+		}
+		err = decoder.decode_value(value.Index(i))
 		if err != nil {
 			return err
 		}
+	}
 
-		return word.DecodeWord(tok.Data)
+	close_token, err = decoder.next_token()
+	if err != nil {
+		return
+	}
+
+	if close_token.Type != token_close {
+		err = fmt.Errorf("array in text appears to exceed bounds")
+	}
+
+	return
+}
+
+func (decoder *Decoder) decode_slice(value reflect.Value) (err error) {
+	var (
+		open_token    *token
+		next_token    *token
+		close_token   *token
+		slice_element reflect.Value
+	)
+	open_token, err = decoder.next_token()
+	if err != nil {
+		return
+	}
+
+	if open_token.Type != token_open {
+		err = fmt.Errorf("invalid token at start of slice: %d", open_token.Type)
+		return
+	}
+
+	for {
+		next_token, err = decoder.peek_token()
+		if err != nil {
+			return err
+		}
+		if next_token.Type == token_close {
+			break
+		}
+		// element must be allocated
+		slice_element = reflect.New(value.Type().Elem()).Elem()
+		err = decoder.decode_value(slice_element)
+		if err != nil {
+			return
+		}
+		value.Set(reflect.Append(value, slice_element))
+	}
+
+	close_token, err = decoder.next_token()
+	if err != nil {
+		return
+	}
+
+	if close_token.Type != token_close {
+		err = fmt.Errorf("slice does not end with close token?")
+	}
+
+	return
+}
+
+func (decoder *Decoder) decode_map(value reflect.Value) (err error) {
+	var (
+		open_token  *token
+		next_token  *token
+		close_token *token
+	)
+
+	open_token, err = decoder.next_token()
+	if err != nil {
+		return
+	}
+
+	if open_token.Type != token_open {
+		err = fmt.Errorf("invalid token at start of Map: %d: %s", open_token.Type, open_token.Data)
+		return
+	}
+
+	value.Set(reflect.MakeMap(value.Type()))
+
+	for {
+		next_token, err = decoder.peek_token()
+		if err != nil {
+			return err
+		}
+		if next_token.Type == token_close {
+			break
+		}
+
+		key_value := reflect.New(value.Type().Key()).Elem()
+
+		if err := decoder.decode_value(key_value); err != nil {
+			return err
+		}
+
+		map_value := reflect.New(value.Type().Elem()).Elem()
+
+		if err := decoder.decode_value(map_value); err != nil {
+			return err
+		}
+
+		value.SetMapIndex(key_value, map_value)
+	}
+
+	close_token, err = decoder.next_token()
+	if err != nil {
+		return
+	}
+
+	if close_token.Type != token_close {
+		err = fmt.Errorf("map does not end with close token?")
+	}
+
+	return nil
+}
+
+func (decoder *Decoder) decode_struct(value reflect.Value) (err error) {
+	var (
+		open_token *token
+		next_token *token
+	)
+
+	set_fields := make(map[string]bool, value.Type().NumField())
+
+	open_token, err = decoder.next_token()
+	if err != nil {
+		err = fmt.Errorf("error in getting open token: %w", err)
+		return
+	}
+
+	if open_token.Type != token_open {
+		err = fmt.Errorf("struct needs open tag")
+		return
+	}
+
+	for {
+		next_token, err = decoder.next_token()
+		if err != nil {
+			err = fmt.Errorf("error in next_token: %w", err)
+			return
+		}
+
+		if next_token.Type == token_close {
+			break
+		}
+
+		if next_token.Type != token_word {
+			err = fmt.Errorf("non-word token as struct key %d", next_token.Type)
+			return
+		}
+
+		field_name := next_token.Data
+
+		if field_name == "" {
+			err = fmt.Errorf("empty keyword in struct")
+			return
+		}
+
+		field := value.FieldByName(field_name)
+
+		if !field.IsValid() {
+			return fmt.Errorf("no field by the name of %s", spew.Sdump(field_name))
+		}
+
+		err = decoder.decode_value(field)
+		if err != nil {
+			err = fmt.Errorf("error in decode_value: %w", err)
+			return
+		}
+
+		if set_fields[field_name] {
+			return fmt.Errorf("field %s already set", field_name)
+		}
+
+		set_fields[field_name] = true
+	}
+	return
+}
+
+// Consumes a text value from the buffered input stream and decodes it into value
+func (decoder *Decoder) decode_value(value reflect.Value) (err error) {
+	if can_encode_word(value) {
+		var (
+			word       Word
+			word_token *token
+		)
+		if reflect.PointerTo(value.Type()).Implements(word_type) {
+			word = value.Addr().Interface().(Word)
+		} else if value.Type().Implements(word_type) {
+			word = value.Interface().(Word)
+		}
+		initialize_value(value)
+		word_token, err = decoder.next_word()
+		if err != nil {
+			return
+		}
+
+		return word.DecodeWord(word_token.Data)
 	}
 
 	switch value.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		tok, err := decoder.NextWord()
-		if err != nil {
-			return err
-		}
-
-		i, err := strconv.ParseInt(tok.Data, 0, bitSize(value.Kind()))
-		if err != nil {
-			return err
-		}
-
-		value.SetInt(i)
-		return nil
+		return decoder.decode_int(value)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		tok, err := decoder.NextWord()
-		if err != nil {
-			return err
-		}
-
-		i, err := strconv.ParseUint(tok.Data, 0, bitSize(value.Kind()))
-		if err != nil {
-			return err
-		}
-
-		value.SetUint(i)
-		return nil
+		return decoder.decode_uint(value)
 	case reflect.Float32, reflect.Float64:
-		tok, err := decoder.NextWord()
-		if err != nil {
-			return err
-		}
-		float, err := strconv.ParseFloat(tok.Data, bitSize(value.Kind()))
-		if err != nil {
-			return err
-		}
-		value.SetFloat(float)
-		return nil
+		return decoder.decode_float(value)
 	case reflect.Bool:
-		tok, err := decoder.NextWord()
-		if err != nil {
-			return err
-		}
-		boolean, err := strconv.ParseBool(tok.Data)
-		if err != nil {
-			return err
-		}
-		value.SetBool(boolean)
-		return nil
+		return decoder.decode_bool(value)
 	case reflect.String:
-		tok, err := decoder.NextWord()
-		if err != nil {
-			return err
-		}
-		value.SetString(tok.Data)
-		return nil
+		return decoder.decode_string(value)
 	case reflect.Array:
-		tok, err := decoder.nextToken()
-		if err != nil {
-			return err
-		}
-
-		if tok.Type != TokOpen {
-			return fmt.Errorf("invalid token at start of array: %d", tok.Type)
-		}
-
-		var lastToken *Token
-
-		for x := 0; x < value.Len(); x++ {
-			nextToken, err := decoder.nextToken()
-			if err != nil {
-				return err
-			}
-			if nextToken.Type == TokClose {
-				break
-			}
-			decoder.tokens = []*Token{nextToken}
-			err = decoder.decodeValue(value.Index(x))
-			if err != nil {
-				return err
-			}
-			lastToken = nextToken
-		}
-
-		if lastToken.Type != TokClose {
-			return fmt.Errorf("no close token at end of array")
-		}
-		return nil
+		return decoder.decode_array(value)
 	case reflect.Slice:
-		tok, err := decoder.nextToken()
-		if err != nil {
-			return err
-		}
-
-		if tok.Type != TokOpen {
-			return fmt.Errorf("invalid token at start of slice: %d", tok.Type)
-		}
-
-		for {
-			nextToken, err := decoder.nextToken()
-			if err != nil {
-				return err
-			}
-			if nextToken.Type == TokClose {
-				break
-			}
-			decoder.tokens = []*Token{nextToken}
-			newObject := reflect.New(value.Type().Elem())
-			err = decoder.decodeValue(newObject.Elem())
-			if err != nil {
-				return err
-			}
-			value.Set(reflect.Append(value, newObject.Elem()))
-		}
-
-		return nil
+		return decoder.decode_slice(value)
 	case reflect.Struct:
-		fieldSet := map[string]bool{}
-
-		openToken, err := decoder.nextToken()
-		if err != nil {
-			return err
-		}
-
-		if openToken.Type != TokOpen {
-			return fmt.Errorf("struct needs open tag")
-		}
-
-		for {
-			nextToken, err := decoder.nextToken()
-			if err != nil {
-				return err
-			}
-
-			if nextToken.Type == TokClose {
-				break
-			}
-
-			if nextToken.Type != TokWord {
-				return fmt.Errorf("non-word token as struct key %d", nextToken.Type)
-			}
-
-			fieldName := nextToken.Data
-
-			if fieldName == "" {
-				return fmt.Errorf("empty keyword in struct")
-			}
-
-			var field reflect.Value
-			// Multi-field key
-			if strings.Contains(fieldName, ".") {
-				field = value
-				fieldNames := strings.Split(fieldName, ".")
-				fieldNamesIter := fieldNames
-
-				for len(fieldNamesIter) > 0 {
-					nextFieldKey := fieldNamesIter[0]
-					fieldNamesIter = fieldNamesIter[1:]
-
-					field = field.FieldByName(nextFieldKey)
-					if !field.IsValid() {
-						return fmt.Errorf("no field by the name of %s (%s)", strings.Join(fieldNames, "."), nextFieldKey)
-					}
-				}
-			} else {
-				field = value.FieldByName(fieldName)
-
-				if !field.IsValid() {
-					return fmt.Errorf("no field by the name of %s", spew.Sdump(fieldName))
-				}
-			}
-
-			err = decoder.decodeValue(field)
-			if err != nil {
-				return err
-			}
-
-			if fieldSet[fieldName] {
-				return fmt.Errorf("field %s already set", fieldName)
-			}
-
-			fieldSet[fieldName] = true
-		}
-		return nil
+		return decoder.decode_struct(value)
 	case reflect.Map:
-		openToken, err := decoder.nextToken()
-		if err != nil {
-			return err
-		}
-
-		if openToken.Type != TokOpen {
-			return fmt.Errorf("invalid token at start of Map: %d: %s", openToken.Type, openToken.Data)
-		}
-
-		value.Set(reflect.MakeMap(value.Type()))
-
-		for {
-			nextToken, err := decoder.nextToken()
-			if err != nil {
-				return err
-			}
-			if nextToken.Type == TokClose {
-				break
-			} else {
-				decoder.tokens = []*Token{nextToken}
-			}
-
-			keyValue := reflect.New(value.Type().Key()).Elem()
-			if err := decoder.decodeValue(keyValue); err != nil {
-				return err
-			}
-
-			mapValue := reflect.New(value.Type().Elem()).Elem()
-
-			if err := decoder.decodeValue(mapValue); err != nil {
-				return err
-			}
-
-			value.SetMapIndex(keyValue, mapValue)
-		}
-		return nil
+		return decoder.decode_map(value)
 	default:
-		if !value.IsValid() {
-			panic("invalid value")
-		}
-		return fmt.Errorf("unknown kind for %s", value.Kind())
 	}
-	panic("should be unreachable")
+
+	return fmt.Errorf("unknown kind for %s", value.Kind())
 }
 
-func (decoder *Decoder) Decode(i interface{}) error {
-	value := reflect.ValueOf(i)
-	if value.Kind() == reflect.Ptr {
-		value = value.Elem()
+func (decoder *Decoder) Decode(value any) error {
+	v := reflect.ValueOf(value)
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
 	}
-	value.Set(reflect.New(value.Type()).Elem())
-	return decoder.decodeValue(value)
+	v.Set(reflect.New(v.Type()).Elem())
+	return decoder.decode_value(v)
 }

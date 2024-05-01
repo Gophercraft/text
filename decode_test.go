@@ -2,6 +2,7 @@ package text
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -90,10 +91,15 @@ func TestDecode(t *testing.T) {
 	}
 	// Structs can be one-liners if you want them to
 	{ Strfield hi FloatField "3.6"  }
-	// Put fields into structs without fully bracketing.
 	{
-		Fielded.Data "Test"
+		Fielded {
+			Data "Test"
+		}
 	}
+	/*
+	!!! 23ldaladalxzcz
+	dfaleww {}ASD}WE
+	*/
 	// Map
 	{
 		MapThing
@@ -102,6 +108,12 @@ func TestDecode(t *testing.T) {
 			EvenHave.Periods too
 		}
 
+		/*
+		* !!! 23ldaladalxzcz
+		* dfaleww {}ASD}WE
+		* 
+		*
+		*/
 		Dict johnny:got,his:gun
 
 		Some huh
@@ -129,7 +141,7 @@ func TestDecode(t *testing.T) {
 
 	for {
 		err := decoder.Decode(&test)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 

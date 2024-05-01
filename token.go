@@ -1,138 +1,188 @@
 package text
 
 import (
+	"errors"
 	"fmt"
 	"io"
 )
 
-type TokenType uint8
+type token_type uint8
 
 const (
-	TokOpen TokenType = iota
-	TokClose
-	TokWord
+	token_open token_type = iota
+	token_close
+	token_word
 )
 
-type Token struct {
-	Type TokenType
+type token struct {
+	Type token_type
 	Data string
 }
 
-func (decoder *Decoder) getQuotedWord() (*Token, error) {
-	tok := &Token{TokWord, ""}
-	_, err := decoder.input.ReadByte()
+func (decoder *Decoder) read_quoted_word() (word *token, err error) {
+	word = &token{token_word, ""}
+	_, err = decoder.input.ReadByte()
 	if err != nil {
-		return nil, err
+		return
 	}
 
 	for {
-		nextChar, _, err := decoder.input.ReadRune()
+		var next_char rune
+		next_char, _, err = decoder.input.ReadRune()
 		if err != nil {
-			return nil, err
+			return
 		}
 
-		if nextChar == '"' {
-			return tok, nil
+		if next_char == '"' {
+			return
 		}
 
-		if nextChar == '\n' {
+		if next_char == '\n' {
 			decoder.line++
 			decoder.column = 0
 		}
 
-		if nextChar == '\\' {
-			escapedChar, _, err := decoder.input.ReadRune()
+		if next_char == '\\' {
+			var escaped_char rune
+			escaped_char, _, err = decoder.input.ReadRune()
 			if err != nil {
-				return nil, err
+				return
 			}
 
-			switch escapedChar {
+			switch escaped_char {
 			case 'n':
-				nextChar = '\n'
+				next_char = '\n'
 			case 'r':
-				nextChar = '\r'
+				next_char = '\r'
 			case 't':
-				nextChar = '\t'
+				next_char = '\t'
 			case '\\':
-				nextChar = '\\'
+				next_char = '\\'
 			case '"':
-				nextChar = '"'
+				next_char = '"'
 			default:
-				return nil, fmt.Errorf("unknown escape sequence: \\%c", nextChar)
+				return nil, fmt.Errorf("unknown escape sequence: \\%c", next_char)
 			}
 		}
 
 		decoder.column++
 
-		tok.Data += string(nextChar)
+		word.Data += string(next_char)
 	}
 }
 
-func (decoder *Decoder) getWord() (*Token, error) {
-	beginning, err := decoder.input.Peek(1)
+func (decoder *Decoder) read_word() (word *token, err error) {
+	var beginning []byte
+	beginning, err = decoder.input.Peek(1)
 	if err != nil {
-		return nil, err
+		err = fmt.Errorf("error peeking in read_word: %w", err)
+		return
 	}
 
 	if beginning[0] == '"' {
-		return decoder.getQuotedWord()
+		return decoder.read_quoted_word()
 	}
 
-	tok := &Token{TokWord, ""}
+	word = &token{token_word, ""}
 
 	for {
-		b, _, err := decoder.input.ReadRune()
+		var next_char rune
+		next_char, _, err = decoder.input.ReadRune()
 		if err != nil {
-			return tok, err
+			if errors.Is(err, io.EOF) {
+				err = nil
+				return
+			}
+			err = fmt.Errorf("error while reading next character: %w", err)
+			return
 		}
 
-		// terminators
-		switch b {
+		// whitespace or new line can terminate a word
+		switch next_char {
 		case ' ':
 			decoder.column++
-			return tok, nil
+			return
 		case '\n':
 			decoder.column = 1
 			decoder.line++
-			return tok, nil
+			return
 		case '\r':
-			return tok, nil
+			return
 		case '\t':
 			decoder.column++
-			return tok, nil
+			return
 		}
 
-		tok.Data += string(b)
+		word.Data += string(next_char)
 		decoder.column++
 	}
 }
 
-func (decoder *Decoder) nextToken() (tok *Token, err error) {
-	if len(decoder.tokens) > 0 {
-		tok = decoder.tokens[0]
-		decoder.tokens = decoder.tokens[1:]
+// Read a token from the input stream while not consuming it
+func (decoder *Decoder) peek_token() (t *token, err error) {
+	t, err = decoder.next_token()
+	if err != nil {
+		return
+	}
+
+	decoder.peeked_tokens = append(decoder.peeked_tokens, t)
+	return
+}
+
+// Consume a token
+func (decoder *Decoder) next_token() (t *token, err error) {
+	if len(decoder.peeked_tokens) > 0 {
+		t = decoder.peeked_tokens[0]
+		decoder.peeked_tokens = decoder.peeked_tokens[1:]
 		return
 	}
 
 	var b []byte
 
+main_loop:
 	for {
 		b, err = decoder.input.Peek(1)
 		if err != nil {
-			return nil, err
+			err = fmt.Errorf("error peeking in input: %w", err)
+			return
 		}
 
 		switch b[0] {
 		case '/':
-			ss, err := decoder.input.Peek(2)
+			var ss []byte
+			ss, err = decoder.input.Peek(2)
 			if err != nil {
-				return nil, err
+				return
 			}
+			// Read double-slash comment
 			if ss[1] == '/' {
-				if _, err := decoder.input.ReadString('\n'); err != nil {
-					return nil, err
+				if _, err = decoder.input.ReadString('\n'); err != nil {
+					return
 				}
-				continue
+				continue main_loop
+			} else if ss[1] == '*' {
+				// Read a block comment
+				var d [2]byte
+				decoder.input.Read(d[:])
+
+				for {
+					var r rune
+					r, _, err = decoder.input.ReadRune()
+					if err != nil {
+						return
+					}
+
+					if r == '*' {
+						r, _, err = decoder.input.ReadRune()
+						if err != nil {
+							return
+						}
+
+						if r == '/' {
+							continue main_loop
+						}
+					}
+				}
 			} else {
 				return nil, fmt.Errorf("stray comment")
 			}
@@ -152,37 +202,29 @@ func (decoder *Decoder) nextToken() (tok *Token, err error) {
 		case '{':
 			decoder.input.ReadByte()
 			decoder.column++
-			tok = &Token{Type: TokOpen}
+			t = &token{Type: token_open}
 			return
 		case '}':
 			decoder.input.ReadByte()
 			decoder.column++
-			tok = &Token{Type: TokClose}
+			t = &token{Type: token_close}
 			return
 		default:
-			tok, err = decoder.getWord()
+			t, err = decoder.read_word()
 			return
 		}
 	}
 }
 
-func (decoder *Decoder) NextWord() (*Token, error) {
-	tok, err := decoder.nextToken()
+func (decoder *Decoder) next_word() (word *token, err error) {
+	word, err = decoder.next_token()
 	if err != nil {
-		if err == io.EOF {
-			if tok != nil {
-				if len(tok.Data) > 0 {
-					return tok, nil
-				}
-			}
-		}
-
 		return nil, err
 	}
 
-	if tok.Type != TokWord {
-		return nil, fmt.Errorf("invalid Token type %d", tok.Type)
+	if word.Type != token_word {
+		return nil, fmt.Errorf("invalid Token type %d", word.Type)
 	}
 
-	return tok, nil
+	return
 }

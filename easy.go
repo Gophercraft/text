@@ -2,14 +2,14 @@ package text
 
 import "bytes"
 
-func Marshal(v interface{}) ([]byte, error) {
+func Marshal(value any) ([]byte, error) {
 	out := new(bytes.Buffer)
-	err := NewEncoder(out).Encode(v)
+	err := NewEncoder(out).Encode(value)
 	return out.Bytes(), err
 }
 
-func Unmarshal(b []byte, v interface{}) error {
+func Unmarshal(b []byte, value any) error {
 	in := bytes.NewReader(b)
-	err := NewDecoder(in).Decode(v)
+	err := NewDecoder(in).Decode(value)
 	return err
 }

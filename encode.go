@@ -29,29 +29,25 @@ func (encoder *Encoder) writeIndentation(depth int) {
 	}
 }
 
-func (encoder *Encoder) Encode(i interface{}) error {
-	value := reflect.ValueOf(i)
-	if value.Kind() == reflect.Ptr {
-		value = value.Elem()
+func (encoder *Encoder) Encode(value any) error {
+	v := reflect.ValueOf(value)
+	if v.Kind() == reflect.Pointer {
+		v = v.Elem()
 	}
-	return encoder.encodeValue(0, value)
+	return encoder.encode_value(0, v)
 }
 
-func encodeString(out io.Writer, str string) error {
+func encode_string(out io.Writer, str string) error {
 	if str == "" {
 		// an empty word where a value should be can be confusing and/or perilous.
 		_, err := out.Write([]byte(`""`))
 		return err
 	}
 
+	can_encode_without_quotes := !strings.ContainsAny(str, " \n\t\r'\\\"")
+
 	// Without escape sequences, the string is good to be encoded without quotes.
-	if (strings.Contains(str, " ") ||
-		strings.Contains(str, "\n") ||
-		strings.Contains(str, "\t") ||
-		strings.Contains(str, "\r") ||
-		strings.Contains(str, "'") ||
-		strings.Contains(str, "\\") ||
-		strings.Contains(str, "\"")) == false {
+	if can_encode_without_quotes {
 		_, err := out.Write([]byte(str))
 		return err
 	}
@@ -66,29 +62,29 @@ func encodeString(out io.Writer, str string) error {
 	return err
 }
 
-func (encoder *Encoder) encodeString(str string) error {
-	return encodeString(encoder.out, str)
+func (encoder *Encoder) encode_string(str string) error {
+	return encode_string(encoder.out, str)
 }
 
-func canEncodeWord(field reflect.Value) bool {
-	return reflect.PtrTo(field.Type()).Implements(wordType) || field.Type().Implements(wordType)
+func can_encode_word(field reflect.Value) bool {
+	return reflect.PointerTo(field.Type()).Implements(word_type) || field.Type().Implements(word_type)
 }
 
-func isCurly(field reflect.Value) bool {
-	return !canEncodeWord(field) && (field.Kind() == reflect.Struct || field.Kind() == reflect.Array || field.Kind() == reflect.Slice || field.Kind() == reflect.Map)
+func is_bracketed_value(field reflect.Value) bool {
+	return !can_encode_word(field) && (field.Kind() == reflect.Struct || field.Kind() == reflect.Array || field.Kind() == reflect.Slice || field.Kind() == reflect.Map)
 }
 
-func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
+func (encoder *Encoder) encode_value(depth int, value reflect.Value) error {
 	encoder.writeIndentation(depth)
 
-	if canEncodeWord(value) {
+	if can_encode_word(value) {
 		var str string
 		var err error
 		// Maps, etc already act like pointers
-		if value.Type().Implements(wordType) {
+		if value.Type().Implements(word_type) {
 			str, err = value.Interface().(Word).EncodeWord()
 			// Use pointer receiver methods
-		} else if reflect.PtrTo(value.Type()).Implements(wordType) {
+		} else if reflect.PointerTo(value.Type()).Implements(word_type) {
 			if value.CanAddr() {
 				str, err = value.Addr().Interface().(Word).EncodeWord()
 			} else {
@@ -104,7 +100,7 @@ func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
 			return err
 		}
 
-		return encoder.encodeString(str)
+		return encoder.encode_string(str)
 	}
 
 	switch value.Kind() {
@@ -117,7 +113,7 @@ func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
 			return err
 		}
 	case reflect.Float32, reflect.Float64:
-		if _, err := encoder.out.Write([]byte(strconv.FormatFloat(value.Float(), 'f', -1, bitSize(value.Kind())))); err != nil {
+		if _, err := encoder.out.Write([]byte(strconv.FormatFloat(value.Float(), 'f', -1, bit_size(value.Kind())))); err != nil {
 			return err
 		}
 	case reflect.Bool:
@@ -125,17 +121,17 @@ func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
 			return err
 		}
 	case reflect.String:
-		if err := encoder.encodeString(value.String()); err != nil {
+		if err := encoder.encode_string(value.String()); err != nil {
 			return err
 		}
 	case reflect.Slice, reflect.Array:
 		encoder.out.Write([]byte("{\n"))
 		for x := 0; x < value.Len(); x++ {
-			if err := encoder.encodeValue(depth+1, value.Index(x)); err != nil {
+			if err := encoder.encode_value(depth+1, value.Index(x)); err != nil {
 				return err
 			}
 
-			if !isCurly(value.Index(x)) {
+			if !is_bracketed_value(value.Index(x)) {
 				encoder.out.Write([]byte("\n"))
 			}
 		}
@@ -158,14 +154,14 @@ func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
 			encoder.writeIndentation(depth + 1)
 			encoder.out.Write([]byte(value.Type().Field(x).Name))
 
-			if isCurly(field) {
+			if is_bracketed_value(field) {
 				encoder.out.Write([]byte("\n"))
-				if err := encoder.encodeValue(depth+1, field); err != nil {
+				if err := encoder.encode_value(depth+1, field); err != nil {
 					return err
 				}
 			} else {
 				encoder.out.Write([]byte(" "))
-				if err := encoder.encodeValue(0, field); err != nil {
+				if err := encoder.encode_value(0, field); err != nil {
 					return err
 				}
 				encoder.out.Write([]byte("\n"))
@@ -177,24 +173,24 @@ func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
 		encoder.out.Write([]byte("}\n"))
 	case reflect.Map:
 		encoder.out.Write([]byte("{\n"))
-		mKeys := value.MapKeys()
-		sortValues(mKeys)
+		map_keys := value.MapKeys()
+		sort_values(map_keys)
 
-		for _, key := range mKeys {
-			if err := encoder.encodeValue(depth+1, key); err != nil {
+		for _, key := range map_keys {
+			if err := encoder.encode_value(depth+1, key); err != nil {
 				return err
 			}
 
 			field := value.MapIndex(key)
 
-			if isCurly(field) {
+			if is_bracketed_value(field) {
 				encoder.out.Write([]byte("\n"))
-				if err := encoder.encodeValue(depth+1, field); err != nil {
+				if err := encoder.encode_value(depth+1, field); err != nil {
 					return err
 				}
 			} else {
 				encoder.out.Write([]byte(" "))
-				if err := encoder.encodeValue(0, field); err != nil {
+				if err := encoder.encode_value(0, field); err != nil {
 					return err
 				}
 				encoder.out.Write([]byte("\n"))
@@ -209,13 +205,13 @@ func (encoder *Encoder) encodeValue(depth int, value reflect.Value) error {
 	return nil
 }
 
-type valueSorter []reflect.Value
+type value_sorter []reflect.Value
 
-func (vs valueSorter) Len() int {
+func (vs value_sorter) Len() int {
 	return len(vs)
 }
 
-func (vs valueSorter) Less(i, j int) bool {
+func (vs value_sorter) Less(i, j int) bool {
 	switch vs[0].Kind() {
 	case reflect.String:
 		return vs[i].String() < vs[j].String()
@@ -230,18 +226,18 @@ func (vs valueSorter) Less(i, j int) bool {
 	}
 }
 
-func (vs valueSorter) Swap(i, j int) {
+func (vs value_sorter) Swap(i, j int) {
 	_i := vs[i]
 	_j := vs[j]
 	vs[i] = _j
 	vs[j] = _i
 }
 
-func sortValues(values []reflect.Value) {
+func sort_values(values []reflect.Value) {
 	if len(values) == 0 {
 		return
 	}
 
-	sorter := valueSorter(values)
+	sorter := value_sorter(values)
 	sort.Sort(sorter)
 }
