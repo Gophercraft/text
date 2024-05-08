@@ -1,6 +1,6 @@
 # Gophercraft/text
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/Gophercraft/phylactery.svg)](https://pkg.go.dev/github.com/Gophercraft/phylactery)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Gophercraft/phylactery.svg)](https://pkg.go.dev/github.com/Gophercraft/text)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Chat on discord](https://img.shields.io/discord/556039662997733391.svg)](https://discord.gg/xPtuEjt)
 
