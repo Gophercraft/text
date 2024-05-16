@@ -12,6 +12,8 @@ const (
 	token_open token_type = iota
 	token_close
 	token_word
+	token_open_table_header
+	token_close_table_header
 )
 
 type token struct {
@@ -199,6 +201,16 @@ main_loop:
 			decoder.input.ReadByte()
 			decoder.line++
 			decoder.column = 1
+		case '[':
+			decoder.input.ReadByte()
+			decoder.column++
+			t = &token{Type: token_open_table_header}
+			return
+		case ']':
+			decoder.input.ReadByte()
+			decoder.column++
+			t = &token{Type: token_close_table_header}
+			return
 		case '{':
 			decoder.input.ReadByte()
 			decoder.column++

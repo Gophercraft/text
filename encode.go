@@ -10,8 +10,14 @@ import (
 )
 
 type Encoder struct {
-	out    io.Writer
+	// Have I encoded the table header already?
+	wrote_table_header bool
+	out                io.Writer
+	// What each indent should be. Preferably "\t" or "  "
 	Indent string
+
+	// Tabular encoding
+	Tabular bool
 }
 
 func NewEncoder(out io.Writer) *Encoder {
@@ -29,11 +35,33 @@ func (encoder *Encoder) writeIndentation(depth int) {
 	}
 }
 
-func (encoder *Encoder) Encode(value any) error {
+func (encoder *Encoder) write_table_header(t reflect.Type) (err error) {
+	encoder.out.Write([]byte("[ "))
+	for i := range t.NumField() {
+		if err = encoder.encode_string(t.Field(i).Name); err != nil {
+			return
+		}
+		encoder.out.Write([]byte(" "))
+	}
+	_, err = encoder.out.Write([]byte("]\n"))
+	return
+}
+
+func (encoder *Encoder) Encode(value any) (err error) {
 	v := reflect.ValueOf(value)
 	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
+
+	if encoder.Tabular {
+		if encoder.wrote_table_header == false {
+			if err = encoder.write_table_header(v.Type()); err != nil {
+				return
+			}
+		}
+		return encoder.encode_row(v)
+	}
+
 	return encoder.encode_value(0, v)
 }
 
@@ -44,7 +72,7 @@ func encode_string(out io.Writer, str string) error {
 		return err
 	}
 
-	can_encode_without_quotes := !strings.ContainsAny(str, " \n\t\r'\\\"")
+	can_encode_without_quotes := !strings.ContainsAny(str, " \n\t\r'\\\"{}[]")
 
 	// Without escape sequences, the string is good to be encoded without quotes.
 	if can_encode_without_quotes {
@@ -74,33 +102,37 @@ func is_bracketed_value(field reflect.Value) bool {
 	return !can_encode_word(field) && (field.Kind() == reflect.Struct || field.Kind() == reflect.Array || field.Kind() == reflect.Slice || field.Kind() == reflect.Map)
 }
 
+func (encoder *Encoder) encode_word(value reflect.Value) (err error) {
+	var str string
+	// Maps, etc already act like pointers
+	if value.Type().Implements(word_type) {
+		str, err = value.Interface().(Word).EncodeWord()
+		// Use pointer receiver methods
+	} else if reflect.PointerTo(value.Type()).Implements(word_type) {
+		if value.CanAddr() {
+			str, err = value.Addr().Interface().(Word).EncodeWord()
+		} else {
+			// This value is not addressable, but needs to be used as a pointer receiver. This is a bit of a problem.
+			// This happens when map key values are used
+			// The best we can do is dupe the value.
+			newAlloc := reflect.New(value.Type())
+			newAlloc.Elem().Set(value)
+			str, err = newAlloc.Interface().(Word).EncodeWord()
+		}
+	}
+	if err != nil {
+		return
+	}
+
+	err = encoder.encode_string(str)
+	return
+}
+
 func (encoder *Encoder) encode_value(depth int, value reflect.Value) error {
 	encoder.writeIndentation(depth)
 
 	if can_encode_word(value) {
-		var str string
-		var err error
-		// Maps, etc already act like pointers
-		if value.Type().Implements(word_type) {
-			str, err = value.Interface().(Word).EncodeWord()
-			// Use pointer receiver methods
-		} else if reflect.PointerTo(value.Type()).Implements(word_type) {
-			if value.CanAddr() {
-				str, err = value.Addr().Interface().(Word).EncodeWord()
-			} else {
-				// This value is not addressable, but needs to be used as a pointer receiver. This is a bit of a problem.
-				// This happens when map key values are used
-				// The best we can do is dupe the value.
-				newAlloc := reflect.New(value.Type())
-				newAlloc.Elem().Set(value)
-				str, err = newAlloc.Interface().(Word).EncodeWord()
-			}
-		}
-		if err != nil {
-			return err
-		}
-
-		return encoder.encode_string(str)
+		return encoder.encode_word(value)
 	}
 
 	switch value.Kind() {

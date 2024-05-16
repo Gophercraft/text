@@ -1,65 +1,63 @@
-package text
+package text_test
 
 import (
-	"fmt"
-	"strconv"
+	"bytes"
 	"testing"
+
+	"github.com/Gophercraft/text"
 )
 
-type testMapEncodable map[testEncodable]bool
-
-type testEncodable uint8
-
-func (t *testEncodable) DecodeWord(str string) error {
-	u, err := strconv.ParseUint(str, 0, 8)
-	if err != nil {
-		return err
-	}
-
-	*t = testEncodable(u)
-	return nil
+type record1 struct {
+	ID      uint64
+	Key     string
+	Strings []string
 }
 
-func (t *testEncodable) EncodeWord() (string, error) {
-	return fmt.Sprintf("%d", *t), nil
+type test_case1 struct {
+	Record1      []record1
+	EncodedTable string
 }
 
-type testDoc struct {
-	V testMapEncodable
-}
-
-type MapNest map[string]MapNest
-
-func TestEncode(t *testing.T) {
-
-	doc := &testDoc{
-		V: testMapEncodable{
-			3: false,
-		},
-	}
-
-	data, err := Marshal(doc)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println(string(data))
-
-	mn := make(MapNest)
-
-	mn["level1"] = MapNest{
-		"level2": MapNest{
-			"level3": MapNest{
-				"level4": MapNest{},
+var cases1 = []test_case1{
+	{
+		Record1: []record1{
+			{
+				ID:  1,
+				Key: "ABCDEFGHIJKLMNOP",
+				Strings: []string{
+					"00",
+					"01",
+					"02",
+					"03",
+				},
 			},
 		},
-	}
 
-	data, err = Marshal(mn)
-	if err != nil {
-		panic(err)
-	}
+		EncodedTable: `[ ID Key Strings ]
+{ 1 ABCDEFGHIJKLMNOP { 00 01 02 03 } }
+`,
+	},
+}
 
-	fmt.Println(string(data))
+func TestEncodeTable(t *testing.T) {
+
+	for _, case1 := range cases1 {
+		var buf bytes.Buffer
+		encoder := text.NewEncoder(&buf)
+		encoder.Indent = " "
+		encoder.Tabular = true
+
+		for _, record := range case1.Record1 {
+			if err := encoder.Encode(&record); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		str := buf.String()
+		expected := case1.EncodedTable
+		if str != expected {
+			t.Fatal(str, "should have been equal to", expected)
+		}
+	}
 
 }

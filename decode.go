@@ -23,9 +23,12 @@ var (
 
 // A Decoder reads and decodes text values from an input stream.
 type Decoder struct {
-	input         *bufio.Reader
-	line, column  int
-	peeked_tokens []*token
+	input           *bufio.Reader
+	coding_is_known bool
+	tabular         bool
+	line, column    int
+	peeked_tokens   []*token
+	columns         []string
 }
 
 // NewDecoder returns a new decoder that reads from r.
@@ -290,7 +293,7 @@ func (decoder *Decoder) decode_map(value reflect.Value) (err error) {
 		err = fmt.Errorf("map does not end with close token?")
 	}
 
-	return nil
+	return
 }
 
 func (decoder *Decoder) decode_struct(value reflect.Value) (err error) {
@@ -402,11 +405,30 @@ func (decoder *Decoder) decode_value(value reflect.Value) (err error) {
 	return fmt.Errorf("unknown kind for %s", value.Kind())
 }
 
-func (decoder *Decoder) Decode(value any) error {
+func (decoder *Decoder) Decode(value any) (err error) {
+	if !decoder.coding_is_known {
+		var first_token *token
+		first_token, err = decoder.peek_token()
+		if err == nil {
+			if first_token.Type == token_open_table_header {
+				decoder.tabular = true
+				err = decoder.read_table_header()
+				if err != nil {
+					return
+				}
+			}
+		}
+		decoder.coding_is_known = true
+	}
+
 	v := reflect.ValueOf(value)
 	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 	v.Set(reflect.New(v.Type()).Elem())
-	return decoder.decode_value(v)
+	if decoder.tabular {
+		return decoder.decode_row(v)
+	} else {
+		return decoder.decode_value(v)
+	}
 }
